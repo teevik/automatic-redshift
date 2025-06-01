@@ -139,6 +139,7 @@ async fn main() -> color_eyre::Result<()> {
     }
 }
 
+/// Format time as HH:MM
 fn time_of(timestamp: Timestamp) -> impl Display {
     let timezone = TimeZone::system();
     let zoned = timestamp.to_zoned(timezone);

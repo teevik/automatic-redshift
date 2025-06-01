@@ -1,4 +1,4 @@
-use crate::color::{Color, colorramp_fill};
+use crate::color::fill_colorramp;
 use color_eyre::eyre::bail;
 use log::debug;
 use std::os::fd::{AsRawFd, RawFd};
@@ -15,61 +15,6 @@ use wayrs_protocols::wlr_gamma_control_unstable_v1::{
 pub struct Wayland {
     conn: AsyncFd<Connection<WaylandState>>,
     state: WaylandState,
-}
-
-pub struct WaylandState {
-    pub outputs: Vec<Output>,
-    pub gamma_manager: ZwlrGammaControlManagerV1,
-}
-
-impl WaylandState {
-    /// Returns the average color of all outputs, or the default color if there are no outputs
-    pub fn color(&self) -> Color {
-        if self.outputs.is_empty() {
-            Color::default()
-        } else {
-            let color = self.outputs.iter().fold(
-                Color {
-                    inverted: true,
-                    brightness: 0.0,
-                    temp: 0,
-                    gamma: 0.0,
-                },
-                |color, output| {
-                    let output_color = output.color();
-                    Color {
-                        inverted: color.inverted && output_color.inverted,
-                        brightness: color.brightness + output_color.brightness,
-                        temp: color.temp + output_color.temp,
-                        gamma: color.gamma + output_color.gamma,
-                    }
-                },
-            );
-
-            Color {
-                temp: color.temp / self.outputs.len() as u16,
-                gamma: color.gamma / self.outputs.len() as f64,
-                brightness: color.brightness / self.outputs.len() as f64,
-                inverted: color.inverted,
-            }
-        }
-    }
-
-    pub fn set_temperature(&mut self, temp: u16) {
-        debug!(
-            "Setting temperature to {} K for {} outputs",
-            temp,
-            self.outputs.len()
-        );
-        for output in &mut self.outputs {
-            let color = output.color();
-            debug!(
-                "Output {}: changing color from temp {} K to {} K",
-                output.reg_name, color.temp, temp
-            );
-            output.set_color(Color { temp, ..color });
-        }
-    }
 }
 
 impl AsRawFd for Wayland {
@@ -92,6 +37,7 @@ impl Wayland {
         let mut state = WaylandState {
             outputs: Vec::new(),
             gamma_manager,
+            temperature: 6500,
         };
 
         conn.add_registry_cb(wl_registry_cb);
@@ -104,21 +50,18 @@ impl Wayland {
     }
 
     pub fn set_temperature(&mut self, temperature: u16) -> color_eyre::Result<()> {
-        self.state.set_temperature(temperature);
+        let did_change = self.state.set_temperature(temperature);
 
-        self.conn.get_mut().dispatch_events(&mut self.state);
+        if did_change {
+            self.conn.get_mut().dispatch_events(&mut self.state);
 
-        for output in &mut self.state.outputs {
-            if output.color_changed {
-                debug!(
-                    "Output {}: color_changed flag is set, updating display",
-                    output.reg_name
-                );
-                output.update_displayed_color(self.conn.get_mut())?;
+            for output in &mut self.state.outputs {
+                debug!("Output {}: updating displayed temperature", output.reg_name);
+                output.update_displayed_temperature(self.state.temperature, self.conn.get_mut())?;
             }
-        }
 
-        self.conn.get_mut().flush(IoMode::Blocking)?;
+            self.conn.get_mut().flush(IoMode::Blocking)?;
+        }
 
         Ok(())
     }
@@ -134,15 +77,38 @@ impl Wayland {
     }
 }
 
+pub struct WaylandState {
+    pub outputs: Vec<Output>,
+    pub gamma_manager: ZwlrGammaControlManagerV1,
+    pub temperature: u16,
+}
+
+impl WaylandState {
+    #[must_use]
+    pub fn set_temperature(&mut self, temperature: u16) -> bool {
+        if temperature != self.temperature {
+            debug!(
+                "Temperature changed from {:?} to {:?}",
+                self.temperature, temperature
+            );
+            self.temperature = temperature;
+
+            true
+        } else {
+            debug!("Temperature unchanged {:?}", temperature);
+
+            false
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Output {
     reg_name: u32,
     wl: WlOutput,
     name: Option<String>,
-    color: Color,
     gamma_control: ZwlrGammaControlV1,
     ramp_size: usize,
-    color_changed: bool,
 }
 
 impl Output {
@@ -158,10 +124,8 @@ impl Output {
             reg_name: global.name,
             wl: output,
             name: None,
-            color: Color::default(),
             gamma_control: gamma_manager.get_gamma_control_with_cb(conn, output, gamma_control_cb),
             ramp_size: 0,
-            color_changed: true,
         })
     }
 
@@ -171,25 +135,9 @@ impl Output {
         self.wl.release(conn);
     }
 
-    pub fn color(&self) -> Color {
-        self.color
-    }
-
-    pub fn set_color(&mut self, color: Color) {
-        if color != self.color {
-            debug!(
-                "Output {}: color changed from {:?} to {:?}",
-                self.reg_name, self.color, color
-            );
-            self.color = color;
-            self.color_changed = true;
-        } else {
-            debug!("Output {}: color unchanged {:?}", self.reg_name, color);
-        }
-    }
-
-    fn update_displayed_color(
+    fn update_displayed_temperature(
         &mut self,
+        temperature: u16,
         conn: &mut Connection<WaylandState>,
     ) -> color_eyre::Result<()> {
         if self.ramp_size == 0 {
@@ -201,8 +149,8 @@ impl Output {
         }
 
         debug!(
-            "Output {}: updating gamma ramp with color {:?}, ramp_size {}",
-            self.reg_name, self.color, self.ramp_size
+            "Output {}: updating gamma ramp with temperature {:?}, ramp_size {}",
+            self.reg_name, temperature, self.ramp_size
         );
 
         let file = shmemfdrs2::create_shmem(c"/ramp-buffer")?;
@@ -211,15 +159,14 @@ impl Output {
         let buf = bytemuck::cast_slice_mut::<u8, u16>(&mut mmap);
         let (r, rest) = buf.split_at_mut(self.ramp_size);
         let (g, b) = rest.split_at_mut(self.ramp_size);
-        colorramp_fill(r, g, b, self.ramp_size, self.color);
+        fill_colorramp(r, g, b, self.ramp_size, temperature)?;
 
         debug!(
             "Output {}: setting gamma ramp with temp {} K",
-            self.reg_name, self.color.temp
+            self.reg_name, temperature
         );
         self.gamma_control.set_gamma(conn, file.into());
 
-        self.color_changed = false;
         debug!("Output {}: gamma ramp update completed", self.reg_name);
         Ok(())
     }
@@ -233,8 +180,9 @@ fn wl_registry_cb(
     match event {
         wl_registry::Event::Global(global) if global.is::<WlOutput>() => {
             let mut output = Output::bind(conn, global, state.gamma_manager).unwrap();
-            output.set_color(state.color());
-            output.update_displayed_color(conn).unwrap();
+            output
+                .update_displayed_temperature(state.temperature, conn)
+                .unwrap();
             state.outputs.push(output);
         }
         wl_registry::Event::GlobalRemove(name) => {
@@ -254,18 +202,23 @@ fn gamma_control_cb(ctx: EventCtx<WaylandState, ZwlrGammaControlV1>) {
         .iter()
         .position(|o| o.gamma_control == ctx.proxy)
         .expect("Received event for unknown output");
+
     match ctx.event {
         zwlr_gamma_control_v1::Event::GammaSize(size) => {
             let output = &mut ctx.state.outputs[output_index];
             debug!("Output {}: ramp_size = {}", output.reg_name, size);
             output.ramp_size = size as usize;
-            output.update_displayed_color(ctx.conn).unwrap();
+            output
+                .update_displayed_temperature(ctx.state.temperature, ctx.conn)
+                .unwrap();
         }
+
         zwlr_gamma_control_v1::Event::Failed => {
             let output = ctx.state.outputs.swap_remove(output_index);
             debug!("Output {}: gamma_control::Event::Failed", output.reg_name);
             output.destroy(ctx.conn);
         }
+
         _ => (),
     }
 }
@@ -278,6 +231,7 @@ fn wl_output_cb(ctx: EventCtx<WaylandState, WlOutput>) {
             .iter_mut()
             .find(|o| o.wl == ctx.proxy)
             .unwrap();
+
         let name = String::from_utf8(name.into_bytes()).expect("invalid output name");
         debug!("Output {}: name = {name:?}", output.reg_name);
         output.name = Some(name);
