@@ -18,7 +18,7 @@ mod wayland;
 const HIGH_TEMP: u16 = 6500;
 const LOW_TEMP: u16 = 4000;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Sun {
     dawn: Timestamp,
     sunrise: Timestamp,
@@ -93,13 +93,14 @@ async fn main() -> color_eyre::Result<()> {
     pin_mut!(location_coordinates_stream);
 
     let mut coordinates = None;
+    let mut sun = None;
 
     loop {
         select! {
             _ = wayland.poll() => (),
             Some(new_coordinates) = location_coordinates_stream.next() => {
                 let new_coordinates = new_coordinates?;
-                debug!("Latitude: {}, Longitude: {}", new_coordinates.latitude, new_coordinates.longitude);
+                info!("Latitude: {}, Longitude: {}", new_coordinates.latitude, new_coordinates.longitude);
                 coordinates = Some(new_coordinates);
             },
             _ = sleep(Duration::from_secs(60)) => (), // Update temperature every minute
@@ -116,16 +117,21 @@ async fn main() -> color_eyre::Result<()> {
         let now = Timestamp::now();
         debug!("Current time: {}", time_of(now));
 
-        let sun = calculate_sun(now, latitude, longitude)?;
-        debug!(
-            "Dawn: {}, Sunrise: {}, Sunset: {}, Dusk: {}",
-            time_of(sun.dawn),
-            time_of(sun.sunrise),
-            time_of(sun.sunset),
-            time_of(sun.dusk)
-        );
+        let new_sun = calculate_sun(now, latitude, longitude)?;
 
-        let new_temp = get_temperature(now, sun);
+        if Some(new_sun) != sun {
+            sun = Some(new_sun);
+
+            info!(
+                "Dawn: {}, Sunrise: {}, Sunset: {}, Dusk: {}",
+                time_of(new_sun.dawn),
+                time_of(new_sun.sunrise),
+                time_of(new_sun.sunset),
+                time_of(new_sun.dusk)
+            );
+        }
+
+        let new_temp = get_temperature(now, new_sun);
 
         debug!("Calculated temperature: {new_temp} K");
 

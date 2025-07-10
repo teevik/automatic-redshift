@@ -1,6 +1,6 @@
 use crate::color::fill_colorramp;
 use color_eyre::eyre::bail;
-use log::debug;
+use log::{debug, info};
 use std::os::fd::{AsRawFd, RawFd};
 use tokio::io::{Interest, unix::AsyncFd};
 use wayrs_client::{
@@ -117,7 +117,7 @@ impl Output {
         global: &Global,
         gamma_manager: ZwlrGammaControlManagerV1,
     ) -> color_eyre::Result<Self> {
-        debug!("New output: {}", global.name);
+        info!("New output: {}", global.name);
         let output = global.bind_with_cb(conn, 4, wl_output_cb)?;
 
         Ok(Self {
@@ -130,7 +130,7 @@ impl Output {
     }
 
     fn destroy(self, conn: &mut Connection<WaylandState>) {
-        debug!("Output {} removed", self.reg_name);
+        info!("Output {} removed", self.reg_name);
         self.gamma_control.destroy(conn);
         self.wl.release(conn);
     }
@@ -215,7 +215,7 @@ fn gamma_control_cb(ctx: EventCtx<WaylandState, ZwlrGammaControlV1>) {
 
         zwlr_gamma_control_v1::Event::Failed => {
             let output = ctx.state.outputs.swap_remove(output_index);
-            debug!("Output {}: gamma_control::Event::Failed", output.reg_name);
+            info!("Output {}: gamma_control::Event::Failed", output.reg_name);
             output.destroy(ctx.conn);
         }
 

@@ -1,6 +1,6 @@
 # Automatic Redshift
 
-A Linux daemon to automatically adjust your screen's color temperature based on your location and time of day.
+A Linux daemon to automatically adjust screen color temperature based on location and time of day.
 
 `GeoClue` and a compositor with `wlr-gamma-control-unstable-v1` support is required.
 
